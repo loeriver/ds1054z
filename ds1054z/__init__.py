@@ -178,7 +178,7 @@ class DS1054Z(vxi11.Instrument):
         keys = 'fmt, typ, pnts, cnt, xinc, xorig, xref, yinc, yorig, yref'.split(', ')
         return dict(zip(keys, self.waveform_preamble))
 
-    def get_waveform_samples(self, channel, mode='NORMal', start=0, end=250000):
+    def get_waveform_samples(self, channel, mode='NORMal', start=1, end=None):
         """
         Returns the waveform voltage samples of the specified channel.
 
@@ -217,7 +217,7 @@ class DS1054Z(vxi11.Instrument):
                 samples = samples[:-num] + [float('nan')] * num
         return samples
 
-    def get_waveform_bytes(self, channel, mode='NORMal', start=0, end=250000):
+    def get_waveform_bytes(self, channel, mode='NORMal', start=1, end=None):
         """
         Get the waveform data for a specific channel as :py:obj:`bytes`.
         (In most cases you would want to use the higher level
@@ -297,7 +297,7 @@ class DS1054Z(vxi11.Instrument):
             self.mask_begin_num = None
         return buff
 
-    def _get_waveform_bytes_internal(self, channel, mode='RAW', start = 0, end = 250000):
+    def _get_waveform_bytes_internal(self, channel, mode='RAW', start = 1, end = None):
         """
         This function returns the waveform bytes from the scope if you desire
         to read the bytes corresponding to the internal (deep) memory.
@@ -310,15 +310,23 @@ class DS1054Z(vxi11.Instrument):
         self.write(":WAVeform:FORMat BYTE")
         self.write(":WAVeform:MODE " + mode)
         wp = self.waveform_preamble_dict
-        pnts = min(wp['pnts'],end - start)
+        if end is None:
+          pnts = wp['pnts'] - start - 1# to account for len(buff) < pnts later
+        else:
+          pnts = min(wp['pnts'],end - start)
         buff = b""
         max_byte_len = 250000
         pos = start
+        # print "POINTS IS %d" % pnts
         while len(buff) < pnts:
+            # print "LEN(BUFF) is %d" % len(buff)
             self.write(":WAVeform:STARt {0}".format(pos))
+            print ":WAVeform:STARt {0}".format(pos)
             end_pos = min(pos + pnts, pos+max_byte_len-1)
             self.write(":WAVeform:STOP {0}".format(end_pos))
+            print ":WAVeform:STOP {0}".format(end_pos)
             tmp_buff = self.query_raw(":WAVeform:DATA?")
+            # print len(tmp_buff)
             buff += DS1054Z.decode_ieee_block(tmp_buff)
             pos += max_byte_len
         return buff
