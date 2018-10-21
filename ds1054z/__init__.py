@@ -178,7 +178,7 @@ class DS1054Z(vxi11.Instrument):
         keys = 'fmt, typ, pnts, cnt, xinc, xorig, xref, yinc, yorig, yref'.split(', ')
         return dict(zip(keys, self.waveform_preamble))
 
-    def get_waveform_samples(self, channel, mode='NORMal'):
+    def get_waveform_samples(self, channel, mode='NORMal', start=0, end=250000):
         """
         Returns the waveform voltage samples of the specified channel.
 
@@ -204,7 +204,7 @@ class DS1054Z(vxi11.Instrument):
         :rtype: list of float values
         """
 
-        buff = self.get_waveform_bytes(channel, mode=mode)
+        buff = self.get_waveform_bytes(channel, mode=mode, start=start, end=end)
         fmt, typ, pnts, cnt, xinc, xorig, xref, yinc, yorig, yref = self.waveform_preamble
         samples = list(struct.unpack(str(len(buff))+'B', buff))
         samples = [(val - yorig - yref)*yinc for val in samples]
@@ -217,7 +217,7 @@ class DS1054Z(vxi11.Instrument):
                 samples = samples[:-num] + [float('nan')] * num
         return samples
 
-    def get_waveform_bytes(self, channel, mode='NORMal'):
+    def get_waveform_bytes(self, channel, mode='NORMal', start=0, end=250000):
         """
         Get the waveform data for a specific channel as :py:obj:`bytes`.
         (In most cases you would want to use the higher level
@@ -247,7 +247,7 @@ class DS1054Z(vxi11.Instrument):
         if mode.upper().startswith('NORM') or (self.running and mode.upper().startswith('MAX')):
             return self._get_waveform_bytes_screen(channel, mode=mode)
         else:
-            return self._get_waveform_bytes_internal(channel, mode=mode)
+            return self._get_waveform_bytes_internal(channel, mode=mode, start=start, end=end)
 
     def _get_waveform_bytes_screen(self, channel, mode='NORMal'):
         """
@@ -297,7 +297,7 @@ class DS1054Z(vxi11.Instrument):
             self.mask_begin_num = None
         return buff
 
-    def _get_waveform_bytes_internal(self, channel, mode='RAW'):
+    def _get_waveform_bytes_internal(self, channel, mode='RAW', start = 0, end = 250000):
         """
         This function returns the waveform bytes from the scope if you desire
         to read the bytes corresponding to the internal (deep) memory.
@@ -310,15 +310,16 @@ class DS1054Z(vxi11.Instrument):
         self.write(":WAVeform:FORMat BYTE")
         self.write(":WAVeform:MODE " + mode)
         wp = self.waveform_preamble_dict
-        pnts = wp['pnts']
+        pnts = min(wp['pnts'],end - start)
         buff = b""
         max_byte_len = 250000
-        pos = 1
+        pos = start
         while len(buff) < pnts:
             self.write(":WAVeform:STARt {0}".format(pos))
-            end_pos = min(pnts, pos+max_byte_len-1)
+            end_pos = min(pos + pnts, pos+max_byte_len-1)
             self.write(":WAVeform:STOP {0}".format(end_pos))
             tmp_buff = self.query_raw(":WAVeform:DATA?")
+            print len(tmp_buff)
             buff += DS1054Z.decode_ieee_block(tmp_buff)
             pos += max_byte_len
         return buff
