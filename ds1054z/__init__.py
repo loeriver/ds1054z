@@ -319,7 +319,6 @@ class DS1054Z(vxi11.Instrument):
             end_pos = min(pos + pnts, pos+max_byte_len-1)
             self.write(":WAVeform:STOP {0}".format(end_pos))
             tmp_buff = self.query_raw(":WAVeform:DATA?")
-            print len(tmp_buff)
             buff += DS1054Z.decode_ieee_block(tmp_buff)
             pos += max_byte_len
         return buff
