@@ -12,7 +12,7 @@ import sys
 import struct
 import decimal
 
-import vxi11
+import pyvisa
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,7 @@ try:
 except AttributeError:
     clock = time.time
 
-class DS1054Z(vxi11.Instrument):
+class DS1054Z():
     """
     This class represents the oscilloscope.
 
@@ -45,9 +45,12 @@ class DS1054Z(vxi11.Instrument):
     MAX_PROBE_RATIO = 1000
     CHANNEL_LIST = ("CHAN1", "CHAN2", "CHAN3", "CHAN4", "MATH")
 
-    def __init__(self, host, *args, **kwargs):
+    def __init__(self, res_string):
         self.start = clock()
-        super(DS1054Z, self).__init__(host, *args, **kwargs)
+        #no subclassing, use pyvisa instrument as object in new class, cf.
+        #https://stackoverflow.com/questions/31013641/wrapping-a-pyvisa-device-in-a-class
+        self.rm = pyvisa.ResourceManager()
+        self.instrument = self.rm.open_resource(res_string)
         idn = self.idn
         match = re.match(self.IDN_PATTERN, idn)
         if not match:
@@ -75,42 +78,22 @@ class DS1054Z(vxi11.Instrument):
     def log_timing(self, msg):
         logger.info('{0:.3f} - {1}'.format(self.clock(), msg))
 
-    def write_raw(self, cmd, *args, **kwargs):
+    def write_raw(self, msg):
         self.log_timing('starting write')
-        logger.debug('sending: ' + repr(cmd))
-        super(DS1054Z, self).write_raw(cmd, *args, **kwargs)
+        logger.debug('sending: ' + repr(msg))
+        res = self.instrument.write_raw(msg)
         self.log_timing('finishing write')
+        return res
 
-    def read_raw(self, *args, **kwargs):
+    def read_raw(self, size=None):
         self.log_timing('starting read')
-        data = super(DS1054Z, self).read_raw(*args, **kwargs)
+        data = self.instrument.read_raw(size)
         self.log_timing('finished reading {0} bytes'.format(len(data)))
         if len(data) > 200:
             logger.debug('received a long answer: {0} ... {1}'.format(format_hex(data[0:10]), format_hex(data[-10:])))
         else:
             logger.debug('received: ' + repr(data))
         return data
-
-    def query(self, message, *args, **kwargs):
-        """
-        Write a message to the scope and read back the answer.
-        See :py:meth:`vxi11.Instrument.ask()` for optional parameters.
-        """
-        return self.ask(message, *args, **kwargs)
-
-    def query_raw(self, message, *args, **kwargs):
-        """
-        Write a message to the scope and read a (binary) answer.
-
-        This is the slightly modified version of :py:meth:`vxi11.Instrument.ask_raw()`.
-        It takes a command message string and returns the answer as bytes.
-
-        :param str message: The SCPI command to send to the scope.
-        :return: Data read from the device
-        :rtype: bytes
-        """
-        data = message.encode(self.ENCODING)
-        return self.ask_raw(data, *args, **kwargs)
 
     def _interpret_channel(self, channel):
         """ wrapper to allow specifying channels by their name (str) or by their number (int) """
@@ -120,7 +103,7 @@ class DS1054Z(vxi11.Instrument):
 
     @property
     def running(self):
-        return self.query(':TRIGger:STATus?') in ('TD', 'WAIT', 'RUN', 'AUTO')
+        return self.instrument.query(':TRIGger:STATus?') in ('TD', 'WAIT', 'RUN', 'AUTO')
 
     @property
     def waveform_preamble(self):
@@ -140,7 +123,7 @@ class DS1054Z(vxi11.Instrument):
         :return: (fmt, typ, pnts, cnt, xinc, xorig, xref, yinc, yorig, yref)
         :rtype: tuple of float and int values
         """
-        values = self.query(":WAVeform:PREamble?")
+        values = self.instrument.query(":WAVeform:PREamble?")
         #
         # From the Programming Guide:
         # format: <format>,<type>,<points>,<count>,<xincrement>,<xorigin>,<xreference>,<yincrement>,<yorigin>,<yreference>
@@ -206,8 +189,7 @@ class DS1054Z(vxi11.Instrument):
 
         buff = self.get_waveform_bytes(channel, mode=mode, start=start, end=end)
         fmt, typ, pnts, cnt, xinc, xorig, xref, yinc, yorig, yref = self.waveform_preamble
-        samples = list(struct.unpack(str(len(buff))+'B', buff))
-        samples = [(val - yorig - yref)*yinc for val in samples]
+        samples = [(val - yorig - yref)*yinc for val in buff]
         if self.mask_begin_num:
             at_begin = self.mask_begin_num[0]
             num = self.mask_begin_num[1]
@@ -256,9 +238,9 @@ class DS1054Z(vxi11.Instrument):
         """
         channel = self._interpret_channel(channel)
         assert mode.upper().startswith('NOR') or mode.upper().startswith('MAX')
-        self.write(":WAVeform:SOURce " + channel)
-        self.write(":WAVeform:FORMat BYTE")
-        self.write(":WAVeform:MODE " + mode)
+        self.instrument.write(":WAVeform:SOURce " + channel)
+        self.instrument.write(":WAVeform:FORMat BYTE")
+        self.instrument.write(":WAVeform:MODE " + mode)
         wp = self.waveform_preamble_dict
         pnts = wp['pnts']
         starting_at = 1
@@ -271,16 +253,15 @@ class DS1054Z(vxi11.Instrument):
             We will not get back the expected 1200 samples in this case.
             Thus, a fix is needed to determine at which side the samples are missing.
             """
-            self.write(":WAVeform:STARt {0}".format(self.SAMPLES_ON_DISPLAY))
-            self.write(":WAVeform:STARt 1")
-            if int(self.query(":WAVeform:STARt?")) != 1:
+            self.instrument.write(":WAVeform:STARt {0}".format(self.SAMPLES_ON_DISPLAY))
+            self.instrument.write(":WAVeform:STARt 1")
+            if int(self.instrument.query(":WAVeform:STARt?")) != 1:
                 starting_at = self.SAMPLES_ON_DISPLAY - pnts + 1
             else:
                 stopping_at = pnts
-        self.write(":WAVeform:STARt {0}".format(starting_at))
-        self.write(":WAVeform:STOP {0}".format(stopping_at))
-        tmp_buff = self.query_raw(":WAVeform:DATA?")
-        buff = DS1054Z.decode_ieee_block(tmp_buff)
+        self.instrument.write(":WAVeform:STARt {0}".format(starting_at))
+        self.instrument.write(":WAVeform:STOP {0}".format(stopping_at))
+        buff = self.instrument.query_binary_values(":WAVeform:DATA?", datatype='B')
         assert len(buff) == pnts
         if pnts < self.SAMPLES_ON_DISPLAY:
             logger.info('Accessing screen values when the waveform is not entirely ')
@@ -306,9 +287,9 @@ class DS1054Z(vxi11.Instrument):
         assert mode.upper().startswith('MAX') or mode.upper().startswith('RAW')
         if self.running:
             self.stop()
-        self.write(":WAVeform:SOURce " + channel)
-        self.write(":WAVeform:FORMat BYTE")
-        self.write(":WAVeform:MODE " + mode)
+        self.instrument.write(":WAVeform:SOURce " + channel)
+        self.instrument.write(":WAVeform:FORMat BYTE")
+        self.instrument.write(":WAVeform:MODE " + mode)
         wp = self.waveform_preamble_dict
         if end is None:
           pnts = wp['pnts'] - start - 1# to account for len(buff) < pnts later
@@ -320,14 +301,13 @@ class DS1054Z(vxi11.Instrument):
         # print "POINTS IS %d" % pnts
         while len(buff) < pnts:
             # print("LEN(BUFF) is %d" % len(buff))
-            self.write(":WAVeform:STARt {0}".format(pos))
+            self.instrument.write(":WAVeform:STARt {0}".format(pos))
             print(":WAVeform:STARt {0}".format(pos))
             end_pos = min(pos + pnts, pos+max_byte_len-1)
-            self.write(":WAVeform:STOP {0}".format(end_pos))
+            self.instrument.write(":WAVeform:STOP {0}".format(end_pos))
             print(":WAVeform:STOP {0}".format(end_pos))
-            tmp_buff = self.query_raw(":WAVeform:DATA?")
+            buff += self.instrument.query_binary_values(":WAVeform:DATA?", datatype='B')
             # print len(tmp_buff)
-            buff += DS1054Z.decode_ieee_block(tmp_buff)
             pos += max_byte_len
         return buff
 
@@ -370,11 +350,11 @@ class DS1054Z(vxi11.Instrument):
 
         * -Screen/2 to 1s or -Screen/2 to 5000s.
         """
-        return float(self.query(':TIMebase:MAIN:OFFSet?'))
+        return float(self.instrument.query(':TIMebase:MAIN:OFFSet?'))
 
     @timebase_offset.setter
     def timebase_offset(self, new_offset):
-        self.write(":TIMebase:MAIN:OFFSet {0}".format(new_offset))
+        self.instrument.write(":TIMebase:MAIN:OFFSet {0}".format(new_offset))
 
     @property
     def timebase_scale(self):
@@ -392,16 +372,16 @@ class DS1054Z(vxi11.Instrument):
 
         The nearest possible value will be set.
         """
-        return float(self.query(':TIMebase:MAIN:SCALe?'))
+        return float(self.instrument.query(':TIMebase:MAIN:SCALe?'))
 
     @timebase_scale.setter
     def timebase_scale(self, new_timebase):
         new_timebase = min(self.possible_timebase_scale_values, key=lambda x:abs(x-new_timebase))
-        self.write(":TIMebase:MAIN:SCALe {0}".format(new_timebase))
+        self.instrument.write(":TIMebase:MAIN:SCALe {0}".format(new_timebase))
 
     @property
     def sample_rate(self):
-        return float(self.query(':ACQuire:SRATe?'))
+        return float(self.instrument.query(':ACQuire:SRATe?'))
 
     @property
     def waveform_time_values(self):
@@ -478,50 +458,33 @@ class DS1054Z(vxi11.Instrument):
             formatted_number += unit
         return formatted_number
 
-    @staticmethod
-    def decode_ieee_block(ieee_bytes):
-        """
-        Strips headers (and trailing bytes) from a IEEE binary data block off.
-
-        This is the block format commands like ``:WAVeform:DATA?``, ``:DISPlay:DATA?``,
-        ``:SYSTem:SETup?``, and ``:ETABle<n>:DATA?`` return their data in.
-
-        Named after ``decode_ieee_block()`` in python-ivi
-        """
-        if sys.version_info >= (3, 0):
-            n_header_bytes = int(chr(ieee_bytes[1]))+2
-        else:
-            n_header_bytes = int(ieee_bytes[1])+2
-        n_data_bytes = int(ieee_bytes[2:n_header_bytes].decode('ascii'))
-        return ieee_bytes[n_header_bytes:n_header_bytes + n_data_bytes]
-
     @property
     def idn(self):
         """
         The ``*IDN?`` string of the device.
         Will be fetched every time you access this property.
         """
-        return self.query("*IDN?")
+        return self.instrument.query("*IDN?")
 
     def stop(self):
         """ Stop acquisition """
-        self.write(":STOP")
+        self.instrument.write(":STOP")
 
     def run(self):
         """ Start acquisition """
-        self.write(":RUN")
+        self.instrument.write(":RUN")
 
     def single(self):
         """ Set the oscilloscope to the single trigger mode. """
-        self.write(":SINGle")
+        self.instrument.write(":SINGle")
 
     def tforce(self):
         """ Generate a trigger signal forcefully. """
-        self.write(":TFORce")
+        self.instrument.write(":TFORce")
 
     def set_waveform_mode(self, mode='NORMal'):
         """ Changing the waveform mode """
-        self.write('WAVeform:MODE ' + mode)
+        self.instrument.write('WAVeform:MODE ' + mode)
 
     @property
     def memory_depth_curr_waveform(self):
@@ -534,7 +497,7 @@ class DS1054Z(vxi11.Instrument):
 
         This property will be updated every time you access it.
         """
-        if self.query(':WAVeform:MODE?').startswith('NORM') or self.running:
+        if self.instrument.query(':WAVeform:MODE?').startswith('NORM') or self.running:
             return self.SAMPLES_ON_DISPLAY
         else:
             return self.memory_depth_internal_total
@@ -547,7 +510,7 @@ class DS1054Z(vxi11.Instrument):
 
         This property will be updated every time you access it.
         """
-        mdep = self.query(":ACQuire:MDEPth?")
+        mdep = self.instrument.query(":ACQuire:MDEPth?")
         if mdep == "AUTO":
             srate = self.sample_rate
             scal = self.timebase_scale
@@ -562,17 +525,17 @@ class DS1054Z(vxi11.Instrument):
 
         This property will be updated every time you access it.
         """
-        mdep = self.query(":ACQuire:MDEPth?")
+        mdep = self.instrument.query(":ACQuire:MDEPth?")
         if mdep == "AUTO":
             curr_running = self.running
-            curr_mode = self.query(':WAVeform:MODE?')
+            curr_mode = self.instrument.query(':WAVeform:MODE?')
             if curr_running:
                 self.stop()
             if curr_mode.startswith('NORM'):
                 # in this case we need to switch to RAW mode to find out the memory depth
-                self.write(':WAVeform:MODE RAW')
+                self.instrument.write(':WAVeform:MODE RAW')
                 mdep = self.waveform_preamble_dict['pnts']
-                self.write(':WAVeform:MODE ' + curr_mode)
+                self.instrument.write(':WAVeform:MODE ' + curr_mode)
             else:
                 mdep = self.waveform_preamble_dict['pnts']
             if curr_running:
@@ -607,7 +570,7 @@ class DS1054Z(vxi11.Instrument):
 
         This value of this property will be updated every time you access it.
         """
-        mdepth = self.query(':ACQuire:MDEPth?')
+        mdepth = self.instrument.query(':ACQuire:MDEPth?')
         try:
             return int(mdepth)
         except:
@@ -623,8 +586,8 @@ class DS1054Z(vxi11.Instrument):
         else:
             new_mdepth = mdepth
         assert new_mdepth == 'AUTO' or new_mdepth in self.possible_memory_depth_values
-        self.write(":ACQuire:MDEPth {0}".format(new_mdepth))
-        #assert self.query(":ACQuire:MDEPth?") == new_mdepth
+        self.instrument.write(":ACQuire:MDEPth {0}".format(new_mdepth))
+        #assert self.instrument.query(":ACQuire:MDEPth?") == new_mdepth
 
     @property
     def display_data(self):
@@ -632,11 +595,11 @@ class DS1054Z(vxi11.Instrument):
         The bitmap bytes of the current screen content.
         This property will be updated every time you access it.
         """
-        self.write(":DISPlay:DATA? ON,OFF,PNG")
+        self.instrument.write(":DISPlay:DATA? ON,OFF,PNG")
         logger.info("Receiving screen capture...")
         buff = self.read_raw(self.DISPLAY_DATA_BYTES)
         logger.info("read {0} bytes in .display_data".format(len(buff)))
-        return DS1054Z.decode_ieee_block(buff)
+        return buff[11:]
 
     @property
     def displayed_channels(self):
@@ -646,7 +609,8 @@ class DS1054Z(vxi11.Instrument):
         """
         channel_list = []
         for channel in self.CHANNEL_LIST:
-            if self.query(":{0}:DISPlay?".format(channel)) == '1':
+            if self.instrument.query_ascii_values(":{0}:DISPlay?".format(channel),
+            converter='d')[0] == 1:
                 channel_list.append(channel)
         return channel_list
 
@@ -655,7 +619,7 @@ class DS1054Z(vxi11.Instrument):
         Display (enable) or hide (disable) a channel for aquisition and display
         """
         channel = self._interpret_channel(channel)
-        self.write(':{0}:DISPlay {1}'.format(channel, int(enable)))
+        self.instrument.write(':{0}:DISPlay {1}'.format(channel, int(enable)))
 
     def display_only_channel(self, channel):
         """
@@ -663,14 +627,14 @@ class DS1054Z(vxi11.Instrument):
         """
         channel = self._interpret_channel(channel)
         for ch in self.CHANNEL_LIST:
-            self.write(':{0}:DISPlay {1}'.format(ch, int(ch == channel)))
+            self.instrument.write(':{0}:DISPlay {1}'.format(ch, int(ch == channel)))
 
     def get_probe_ratio(self, channel):
         """
         Returns the probe ratio for a specific channel
         """
         channel = self._interpret_channel(channel)
-        return float(self.query(':{0}:PROBe?'.format(channel)))
+        return float(self.instrument.query(':{0}:PROBe?'.format(channel)))
 
     def set_probe_ratio(self, channel, ratio):
         """
@@ -686,15 +650,17 @@ class DS1054Z(vxi11.Instrument):
         ratio = float(ratio)
         ratio = min(self.possible_probe_ratio_values, key=lambda x:abs(x-ratio))
         channel = self._interpret_channel(channel)
-        self.write(":{0}:PROBe {1}".format(channel, ratio))
-
+        self.instrument.write(":{0}:PROBe {1}".format(channel, ratio))
 
     def get_channel_offset(self, channel):
         """
         Returns the channel offset in volts.
         """
         channel = self._interpret_channel(channel)
-        return float(self.query(':{0}:OFFSet?'.format(channel)))
+        if channel in self.CHANNEL_LIST:
+            return float(self.instrument.query(':{0}:OFFSet?'.format(channel)))
+        else:
+            return None
 
     def set_channel_offset(self, channel, volts):
         """
@@ -717,7 +683,8 @@ class DS1054Z(vxi11.Instrument):
         :param float volts: the new vertical scale offset in volts
         """
         channel = self._interpret_channel(channel)
-        self.write(":{0}:OFFSet {1}".format(channel, volts))
+        if channel in self.CHANNEL_LIST:
+            self.instrument.write(":{0}:OFFSet {1}".format(channel, volts))
 
     def get_channel_scale(self, channel):
         """
@@ -727,7 +694,10 @@ class DS1054Z(vxi11.Instrument):
         :rtype: float
         """
         channel = self._interpret_channel(channel)
-        return float(self.query(':{0}:SCALe?'.format(channel)))
+        if channel in self.CHANNEL_LIST:
+            return float(self.instrument.query(':{0}:SCALe?'.format(channel)))
+        else:
+            return None
 
     def set_channel_scale(self, channel, volts, use_closest_match=False):
         """
@@ -749,7 +719,8 @@ class DS1054Z(vxi11.Instrument):
             probe_ratio = self.get_probe_ratio(channel)
             possible_channel_scale_values = [val * probe_ratio for val in self.possible_channel_scale_values]
             volts = min(possible_channel_scale_values, key=lambda x:abs(x-volts))
-        self.write(":{0}:SCALe {1}".format(channel, volts))
+        if channel in self.CHANNEL_LIST:
+            self.instrument.write(":{0}:SCALe {1}".format(channel, volts))
 
     def get_channel_measurement(self, channel, item, type="CURRent"):
         """
@@ -761,10 +732,13 @@ class DS1054Z(vxi11.Instrument):
         :param str type: Type of measurement, can be CURRent, MAXimum, MINimum, AVERages, DEViation
         """
         channel = self._interpret_channel(channel)
-        ret = float(self.query(":MEASure:STATistic:item? {0},{1},{2}".format(type, item, channel)))
-        if ret == 9.9e37: # This is a value which means that the measurement cannot be taken for some reason (channel disconnected/no edge in the trace etc.)
-            return None
-        return ret
+        if channel in self.CHANNEL_LIST:
+            ret = float(self.instrument.query(":MEASure:STATistic:item? {0},{1},{2}".format(type, item, channel)))
+            if ret == 9.9e37: # This is a value which means that the measurement cannot be taken for some reason (channel disconnected/no edge in the trace etc.)
+                return None
+            return ret
+        else:
+            return None    
 
 def format_hex(byte_str):
     if sys.version_info >= (3, 0):
